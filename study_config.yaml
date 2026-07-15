@@ -91,6 +91,19 @@ sources:
     end_date: SVC_DT
 
 # ─────────────────────────────────────────────────────────────────
+# XAI module (mock-up).
+# Points to a CSV of (timestamp, feature, value, importance_score) — one
+# or more patients, produced by generate_xai_scores.py. Only the
+# importance_score column is fake right now (no trained model exists yet);
+# everything else in the file is real patient data.
+# `file` here is a relative path (unlike the real sources above) because
+# this CSV is a generated artifact that lives inside the repo, not shared
+# external data — see generate_xai_scores.py to regenerate it.
+# ─────────────────────────────────────────────────────────────────
+xai_scores:
+  file: xai_scores/importance_scores.csv
+
+# ─────────────────────────────────────────────────────────────────
 # Fields shown when you hover over, for each source.
 # `column` must match the exact CSV column header.
 # `label`  is the human-readable name shown in the tooltip.
