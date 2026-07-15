@@ -393,15 +393,23 @@ def create_interface():
                         # Status message for chart operations
                         chart_status = gr.Textbox(label="Chart Status", value="No chart loaded", interactive=False)
 
-                # Full width timeline — rendered client-side via Plotly.js
-                # IBD filter buttons live inside the HTML component (no Python round-trip)
-                timeline_plot = gr.HTML(
-                    value="<p style='color:#6b7280;padding:20px;text-align:center;'>"
-                          "Select a patient and click Load Timeline to view the chart.</p>"
-                )
-                
+                # Timeline (client-side Plotly.js) alongside the XAI importance list
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        # IBD filter buttons live inside the HTML component (no Python round-trip)
+                        timeline_plot = gr.HTML(
+                            value="<p style='color:#6b7280;padding:20px;text-align:center;'>"
+                                  "Select a patient and click Load Timeline to view the chart.</p>"
+                        )
+                    with gr.Column(scale=2):
+                        gr.Markdown("### Most Important Items (XAI mock-up)")
+                        xai_list = gr.HTML(
+                            value="<p style='color:#6b7280;padding:12px;'>"
+                                  "Select a patient to see importance scores.</p>"
+                        )
+
                 # Chart information panel - shows patient stats and flare summaries
-                chart_info = gr.Textbox(label="Chart Information", value="No patient data loaded", 
+                chart_info = gr.Textbox(label="Chart Information", value="No patient data loaded",
                                       lines=3, interactive=False, max_lines=4)
         
         # ====================================================================
@@ -711,14 +719,14 @@ def create_interface():
         load_timeline_btn.click(
             app.load_patient_timeline_html,
             inputs=[patient_dropdown],
-            outputs=[timeline_plot, chart_status, chart_info]
+            outputs=[timeline_plot, chart_status, chart_info, xai_list]
         )
 
         # Auto-load when patient dropdown changes
         patient_dropdown.change(
             app.load_patient_timeline_html,
             inputs=[patient_dropdown],
-            outputs=[timeline_plot, chart_status, chart_info]
+            outputs=[timeline_plot, chart_status, chart_info, xai_list]
         )
         
         # ====================================================================
