@@ -708,47 +708,79 @@ class PatientTimelineApp:
         """
         Render the top-n importance-scored items for a patient as a simple HTML list.
 
-        Mock-up only: importance_score is fake (no trained model exists yet).
-        Everything else (timestamp, source, value) is real patient data.
-        No interactivity (e.g. hover-to-highlight on the timeline) yet — that's
-        planned for the later JavaScript front-end overhaul.
+        Reads the TransEHR2 XAI score arrays on disk (via xai_arrays.XaiArrayReader)
+        and maps each score back to its feature, decoded value and time — the real
+        numpy-array workflow, replacing the earlier CSV mock-up.
+
+        Importance scores are still placeholder values (no trained model yet), and
+        the arrays are synthetic (real ones aren't available). Time is shown as
+        hours since admission because recovering calendar dates needs each
+        episode's admission timestamp (open question to the model author).
+        No hover-to-highlight yet — planned for the later JavaScript overhaul.
         """
         if not patient_id:
             return "<p style='color:#6b7280;padding:12px;'>Select a patient to see importance scores.</p>"
 
-        from xai_module import get_top_importance_items
+        from xai_arrays import XaiArrayReader
         study_config = _load_study_config()
-        items = get_top_importance_items(str(patient_id), study_config, n=n)
+        xai_cfg = study_config.get("xai_arrays") or {}
+        base_dir = xai_cfg.get("dir")
+        suffix = xai_cfg.get("suffix", "train")
+        if not base_dir:
+            return "<p style='color:#6b7280;padding:12px;'>No xai_arrays directory configured in study_config.yaml.</p>"
 
+        try:
+            reader = XaiArrayReader(base_dir, suffix)
+        except Exception as e:
+            return f"<p style='color:#ef4444;padding:12px;'>Could not load XAI arrays: {e}</p>"
+
+        # For the current synthetic data, episode_id == patient_id. Whether the
+        # real episode IDs match the webapp's patient IDs is an open question.
+        try:
+            episode_id = int(patient_id)
+        except (ValueError, TypeError):
+            episode_id = patient_id
+
+        if episode_id not in reader.episode_ids:
+            return "<p style='color:#6b7280;padding:12px;'>No importance-score data for this patient.</p>"
+
+        items = reader.top_records(episode_id, n=n)
         if not items:
             return "<p style='color:#6b7280;padding:12px;'>No importance-score data for this patient.</p>"
 
         rows = ""
         for it in items:
-            ts = it["timestamp"].strftime("%Y-%m-%d") if pd.notna(it["timestamp"]) else ""
+            hrs = it["time_hours"]
+            time_str = f"{hrs:.0f} h" if hrs is not None else ""
             rows += (
                 "<tr>"
                 f"<td style='padding:6px 10px;'>{it['score']:+.3f}</td>"
-                f"<td style='padding:6px 10px;'>{ts}</td>"
-                f"<td style='padding:6px 10px;'>{it['feature_source']}</td>"
-                f"<td style='padding:6px 10px;'>{it['feature_value']}</td>"
+                f"<td style='padding:6px 10px;'>{time_str}</td>"
+                f"<td style='padding:6px 10px;'>{it['kind']}</td>"
+                f"<td style='padding:6px 10px;'>{it['feature']}</td>"
+                f"<td style='padding:6px 10px;'>{it['value']}</td>"
                 "</tr>"
             )
 
+        th = ("padding:6px 10px;color:#111827;background:#f3f4f6;"
+              "border-bottom:2px solid #d1d5db;font-weight:600;")
         return f"""
         <div style='max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;'>
         <table style='width:100%;border-collapse:collapse;font-size:13px;'>
-            <thead><tr style='background:#f3f4f6;text-align:left;position:sticky;top:0;'>
-                <th style='padding:6px 10px;'>Score</th>
-                <th style='padding:6px 10px;'>Time</th>
-                <th style='padding:6px 10px;'>Source</th>
-                <th style='padding:6px 10px;'>Detail</th>
+            <thead><tr style='text-align:left;position:sticky;top:0;'>
+                <th style='{th}'>Score</th>
+                <th style='{th}'>Time</th>
+                <th style='{th}'>Kind</th>
+                <th style='{th}'>Feature</th>
+                <th style='{th}'>Value</th>
             </tr></thead>
             <tbody>{rows}</tbody>
         </table>
         </div>
         <p style='color:#9ca3af;font-size:11px;padding:6px 2px 0;'>
-        Mock-up: importance scores are fake (no trained model yet). Event data is real.
+        Synthetic test data — NOT derived from this real patient; shown only to
+        develop the layout until the real model output exists. Scores are
+        placeholders; time is hours since admission; text features not shown yet.
         </p>
         """
 
