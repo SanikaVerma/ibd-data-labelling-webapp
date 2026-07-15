@@ -27,3 +27,7 @@ dist/
 .venv/
 *.pyc
 .python-version
+
+# Generated data — not source code, regenerable via scripts
+uploaded_data/
+xai_scores/
