@@ -91,17 +91,16 @@ sources:
     end_date: SVC_DT
 
 # ─────────────────────────────────────────────────────────────────
-# XAI module (mock-up).
-# Points to a CSV of (timestamp, feature, value, importance_score) — one
-# or more patients, produced by generate_xai_scores.py. Only the
-# importance_score column is fake right now (no trained model exists yet);
-# everything else in the file is real patient data.
-# `file` here is a relative path (unlike the real sources above) because
-# this CSV is a generated artifact that lives inside the repo, not shared
-# external data — see generate_xai_scores.py to regenerate it.
+# XAI module.
+# Points to the directory of TransEHR2 XAI score arrays on disk (the numpy
+# workflow). `dir` holds a `{suffix}/` folder of input arrays, a
+# `{suffix}_xai/` folder of importance scores, plus ids/stats/schema files.
+# Currently synthetic — produced by generate_fake_arrays.py — standing in
+# for real model output until it exists. See xai_arrays.py for the reader.
 # ─────────────────────────────────────────────────────────────────
-xai_scores:
-  file: xai_scores/importance_scores.csv
+xai_arrays:
+  dir: fake_transehr_output
+  suffix: train
 
 # ─────────────────────────────────────────────────────────────────
 # Fields shown when you hover over, for each source.
