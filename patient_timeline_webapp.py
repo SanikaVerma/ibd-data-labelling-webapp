@@ -704,20 +704,68 @@ class PatientTimelineApp:
 
         return info
 
+    def get_xai_list_html(self, patient_id, n=15):
+        """
+        Render the top-n importance-scored items for a patient as a simple HTML list.
+
+        Mock-up only: importance_score is fake (no trained model exists yet).
+        Everything else (timestamp, source, value) is real patient data.
+        No interactivity (e.g. hover-to-highlight on the timeline) yet — that's
+        planned for the later JavaScript front-end overhaul.
+        """
+        if not patient_id:
+            return "<p style='color:#6b7280;padding:12px;'>Select a patient to see importance scores.</p>"
+
+        from xai_module import get_top_importance_items
+        study_config = _load_study_config()
+        items = get_top_importance_items(str(patient_id), study_config, n=n)
+
+        if not items:
+            return "<p style='color:#6b7280;padding:12px;'>No importance-score data for this patient.</p>"
+
+        rows = ""
+        for it in items:
+            ts = it["timestamp"].strftime("%Y-%m-%d") if pd.notna(it["timestamp"]) else ""
+            rows += (
+                "<tr>"
+                f"<td style='padding:6px 10px;'>{it['score']:+.3f}</td>"
+                f"<td style='padding:6px 10px;'>{ts}</td>"
+                f"<td style='padding:6px 10px;'>{it['feature_source']}</td>"
+                f"<td style='padding:6px 10px;'>{it['feature_value']}</td>"
+                "</tr>"
+            )
+
+        return f"""
+        <div style='max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;'>
+        <table style='width:100%;border-collapse:collapse;font-size:13px;'>
+            <thead><tr style='background:#f3f4f6;text-align:left;position:sticky;top:0;'>
+                <th style='padding:6px 10px;'>Score</th>
+                <th style='padding:6px 10px;'>Time</th>
+                <th style='padding:6px 10px;'>Source</th>
+                <th style='padding:6px 10px;'>Detail</th>
+            </tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+        </div>
+        <p style='color:#9ca3af;font-size:11px;padding:6px 2px 0;'>
+        Mock-up: importance scores are fake (no trained model yet). Event data is real.
+        </p>
+        """
+
     def load_patient_timeline_html(self, patient_id):
         """
         Load timeline as client-side HTML/JS (Plotly.js) — no IBD filter round-trip.
 
         Returns:
-            tuple: (html_string, status_message, chart_info_text)
+            tuple: (html_string, status_message, chart_info_text, xai_list_html)
         """
         if self.combined_data is None:
             placeholder = "<p style='color:#6b7280;padding:20px;'>Please load patient data first.</p>"
-            return placeholder, "Please load patient data first", ""
+            return placeholder, "Please load patient data first", "", ""
 
         if not patient_id:
             placeholder = "<p style='color:#6b7280;padding:20px;'>Please select a patient ID.</p>"
-            return placeholder, "Please select a patient ID", ""
+            return placeholder, "Please select a patient ID", "", ""
 
         try:
             try:
@@ -734,11 +782,12 @@ class PatientTimelineApp:
             self.load_existing_flares()
 
             from timeline_visualization import build_timeline_html
-            html   = build_timeline_html(self)
-            info   = self.get_chart_info()
-            status = f"Chart loaded for Patient {self.current_patient_id} — filter using the buttons above the chart"
-            return html, status, info
+            html     = build_timeline_html(self)
+            info     = self.get_chart_info()
+            xai_html = self.get_xai_list_html(pid)
+            status   = f"Chart loaded for Patient {self.current_patient_id} — filter using the buttons above the chart"
+            return html, status, info, xai_html
 
         except Exception as e:
             err_html = f"<p style='color:#ef4444;padding:20px;'>Error: {str(e)}</p>"
-            return err_html, f"Failed to load patient timeline: {str(e)}", ""
+            return err_html, f"Failed to load patient timeline: {str(e)}", "", ""
