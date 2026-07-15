@@ -31,3 +31,4 @@ dist/
 # Generated data — not source code, regenerable via scripts
 uploaded_data/
 xai_scores/
+fake_transehr_output/
