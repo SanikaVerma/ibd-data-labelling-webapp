@@ -32,11 +32,19 @@ One score per feature per timestep — the dot product of a feature's vector wit
 the gradient happens upstream when the score is produced. So score arrays mirror
 the INDICATOR arrays. Text is the exception: one score per token.
 """
+import os
 import pickle
 from pathlib import Path
 
 import numpy as np
 import yaml
+from dotenv import load_dotenv
+
+# Matches LLM_NAME / TOKENIZER_PAD_TOKEN in TransEHR2/constants.py — the text
+# token IDs in the arrays are from this tokenizer's vocabulary, so decoding
+# requires the same one.
+LLM_NAME = "meta-llama/Llama-3.1-70B"
+TOKENIZER_PAD_TOKEN = "[PAD]"
 
 
 class XaiArrayReader:
@@ -83,10 +91,22 @@ class XaiArrayReader:
         self.num_means, self.num_p5, self.num_p95 = stats["means"], stats["p5"], stats["p95"]
 
         self.val_times = self._load(self.data_dir, "val_times")
+        self._tokenizer = None  # loaded lazily — only text needs it
 
     # ----- helpers -----
     def _load(self, d: Path, name: str) -> np.ndarray:
         return np.load(d / f"{name}.npy", mmap_mode="r")
+
+    @property
+    def tokenizer(self):
+        """The Llama tokenizer, loaded on first use (text decoding only)."""
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+            load_dotenv()
+            tk = AutoTokenizer.from_pretrained(LLM_NAME, token=os.getenv("HF_READ_TOKEN"))
+            tk.add_special_tokens({"pad_token": TOKENIZER_PAD_TOKEN})
+            self._tokenizer = tk
+        return self._tokenizer
 
     def _row_for_episode(self, episode_id) -> int:
         try:
@@ -195,6 +215,88 @@ class XaiArrayReader:
                                     value, scores[row, f]))
             offset += size
         return out
+
+    # ----- text (per-token scores) -----
+    def text_records(self, episode_id) -> list:
+        """One record per recorded note, with per-token scores decoded to words.
+
+        Text is stored sparsely (CSR): `offsets` gives this episode's slice of
+        the token/score rows, `timesteps` says which timestep each row belongs
+        to. Each row is a padded token-ID sequence; the mask marks real tokens.
+
+        Scores are per token, so each record carries the decoded note plus the
+        (token, score) pairs behind it — the raw material for the heat-map.
+
+        A single score for the whole note isn't well defined: summing the token
+        scores gives the note's total contribution (gradient x input attributions
+        are additive), while the largest-magnitude token says which single word
+        mattered most. Both are returned; `score` defaults to the sum. Whether
+        that is the right choice for ranking is an open question for the model
+        author.
+        """
+        row = self._row_for_episode(episode_id)
+        out = []
+        for f, feat in enumerate(self.text_feats):
+            offsets = self._load(self.data_dir, f"val_text_offsets_{f}")
+            start, end = int(offsets[row]), int(offsets[row + 1])
+            if end <= start:
+                continue
+            token_ids = self._load(self.data_dir, f"val_text_values_{f}")
+            masks = self._load(self.data_dir, f"val_text_masks_{f}")
+            timesteps = self._load(self.data_dir, f"val_text_timesteps_{f}")
+            scores = self._load(self.xai_dir, f"xai_text_{f}")
+
+            for j in range(start, end):
+                real = np.asarray(masks[j]) == 1.0
+                ids = np.asarray(token_ids[j])[real]
+                sc = np.asarray(scores[j])[real]
+                if ids.size == 0:
+                    continue
+                t = int(timesteps[j])
+                # Special tokens (e.g. <|begin_of_text|>) carry scores because
+                # the model sees them, but they aren't words — flag them so the
+                # display can skip them rather than surfacing them as findings.
+                special = set(self.tokenizer.all_special_ids)
+                tokens = [
+                    {
+                        "token": self.tokenizer.decode([int(i)]),
+                        "score": round(float(s), 3),
+                        "is_special": int(i) in special,
+                    }
+                    for i, s in zip(ids, sc)
+                ]
+                score_sum = float(sc.sum())
+                words = [tok for tok in tokens if not tok["is_special"]]
+                peak = max(words, key=lambda x: abs(x["score"])) if words else None
+                rec = self._record(
+                    episode_id, feat, "text", t, float(self.val_times[row, t]),
+                    self.tokenizer.decode(ids, skip_special_tokens=True), score_sum,
+                )
+                rec["tokens"] = tokens
+                rec["score_sum"] = round(score_sum, 3)
+                rec["top_token"] = peak
+                out.append(rec)
+        return out
+
+    def top_tokens(self, episode_id, n: int = 10) -> list:
+        """The n most important word tokens across all of a patient's notes.
+
+        Special tokens are excluded — they score like any other input but aren't
+        words, so surfacing them as findings would be noise.
+
+        Note these are *tokens*, not words: the tokenizer splits longer words
+        into pieces (e.g. "Crohn" -> " Cro" + "hn"), so a top token can be a
+        fragment. Read alongside the full note rather than in isolation.
+        """
+        toks = []
+        for rec in self.text_records(episode_id):
+            for tok in rec["tokens"]:
+                if tok["is_special"]:
+                    continue
+                toks.append({**tok, "feature": rec["feature"],
+                             "timestep": rec["timestep"], "time_hours": rec["time_hours"]})
+        toks.sort(key=lambda x: abs(x["score"]), reverse=True)
+        return toks[:n]
 
     # ----- top-N across time-associated features -----
     def top_records(self, episode_id, n: int = 15) -> list:
