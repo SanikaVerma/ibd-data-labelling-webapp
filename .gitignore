@@ -25,6 +25,7 @@ dist/
 
 
 .venv/
+venv/
 *.pyc
 .python-version
 
