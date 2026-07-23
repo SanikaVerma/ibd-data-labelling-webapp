@@ -15,16 +15,13 @@ the parallel XAI score arrays, and walks the chain:
 
 FEATURE ORDER
 -------------
-Array column order is derived, not stored. It follows the dataset config's
-ordered feature lists, split by the `type` declared in variable_properties.yaml,
-preserving order of appearance — exactly what DataProcessor.__init__ does:
-
-    numeric_feats     = [f for f in VALUED_FEATS if type(f) == 'numeric']
-    categorical_feats = [f for f in VALUED_FEATS if type(f) == 'categorical']
-    ordinal_feats     = [f for f in VALUED_FEATS if type(f) == 'ordinal']
-
-Reproducing that rule here keeps the mapping traceable without duplicating any
-bookkeeping alongside the arrays.
+Array column order follows the order features appear in variable_properties.yaml
+(the model author's assumption: TransEHR2 builds its arrays in that order, so a
+feature's array column matches its position in that file, with no need to look at
+the source CSVs). The dataset config still supplies each feature's ROLE
+(value-associated / event / static / text), because variable_properties.yaml
+records a feature's type but not its role. Within a role, features are ordered by
+their position in variable_properties.yaml.
 
 SCORE SHAPES
 ------------
@@ -48,6 +45,7 @@ TOKENIZER_PAD_TOKEN = "[PAD]"
 
 
 class XaiArrayReader:
+    # loads metadata, patient ID list, standardization stats, derives feature order
     """Loads on-disk input + XAI score arrays and maps scores back to features."""
 
     def __init__(self, base_dir: str, suffix: str = "train"):
@@ -62,7 +60,10 @@ class XaiArrayReader:
         with open(self.base / f"{suffix}_ids.pkl", "rb") as f:
             self.episode_ids = list(pickle.load(f))
 
-        # Dataset config: the ordered feature lists that dictate array columns.
+        # Dataset config: tells us each feature's ROLE (value-associated / event /
+        # static / text). variable_properties.yaml gives a feature's type but not
+        # its role, so the role lists still come from here. (Open question with the
+        # model author on whether role could live in variable_properties.yaml too.)
         with open(self.base / "dataset_config.yaml") as f:
             cfg = yaml.safe_load(f)
 
@@ -70,22 +71,25 @@ class XaiArrayReader:
         with open(var_props_path) as f:
             self.var_props = yaml.safe_load(f)
 
-        # Re-derive per-type ordering exactly as DataProcessor.__init__ does:
-        # walk VALUED_FEATS in order, bucket by the type in variable_properties.
-        valued = cfg.get("VALUED_FEATS", []) or []
-        self.numeric_feats, self.categorical_feats, self.ordinal_feats = [], [], []
-        for name in valued:
-            ftype = self.var_props[name]["type"]
-            if ftype == "numeric":
-                self.numeric_feats.append(name)
-            elif ftype == "categorical":
-                self.categorical_feats.append(name)
-            elif ftype == "ordinal":
-                self.ordinal_feats.append(name)
-        # These keep their config order directly.
-        self.text_feats = cfg.get("TEXT_FEATS", []) or []
-        self.event_feats = cfg.get("EVENT_FEATS", []) or []
-        self.static_feats = cfg.get("STATIC_FEATS", []) or []
+        # ORDER assumption (per the model author): TransEHR2 builds the arrays with
+        # features in the order they APPEAR IN variable_properties.yaml. So a
+        # feature's array column follows its position in that file — no need to
+        # look at the source CSVs. We reorder each role's features accordingly.
+        vp_pos = {name: i for i, name in enumerate(self.var_props.keys())}
+        def in_vp_order(names):
+            return sorted(names, key=lambda n: vp_pos.get(n, len(vp_pos)))
+
+        valued = in_vp_order(cfg.get("VALUED_FEATS", []) or [])
+        self.numeric_feats = [n for n in valued if self.var_props[n]["type"] == "numeric"]
+        self.categorical_feats = [n for n in valued if self.var_props[n]["type"] == "categorical"]
+        self.ordinal_feats = [n for n in valued if self.var_props[n]["type"] == "ordinal"]
+        self.text_feats = in_vp_order(cfg.get("TEXT_FEATS", []) or [])
+        self.event_feats = in_vp_order(cfg.get("EVENT_FEATS", []) or [])
+        self.static_feats = in_vp_order(cfg.get("STATIC_FEATS", []) or [])
+
+        # Path to the DPD file (din_drug_info.csv) for DIN -> brand-name lookup.
+        self.drug_info_path = cfg.get("DRUG_INFO_PATH")
+        self._dpd = None  # loaded lazily on first drug lookup
 
         stats = np.load(self.base / f"summary_statistics_{suffix}.npz")
         self.num_means, self.num_p5, self.num_p95 = stats["means"], stats["p5"], stats["p95"]
@@ -298,6 +302,134 @@ class XaiArrayReader:
         toks.sort(key=lambda x: abs(x["score"]), reverse=True)
         return toks[:n]
 
+    # ----- drugs (per-drug scores, DIN -> brand name via the DPD file) -----
+    def _dpd_lookup(self) -> dict:
+        """DIN (int) -> {brand, ingredient, strength, class} from din_drug_info.csv.
+
+        The DPD lists one row per ingredient, so a DIN can repeat; we keep the
+        first row per DIN and join ingredient names. Non-numeric DINs (the file
+        uses 'Not Applicable' in places) are skipped.
+        """
+        if self._dpd is not None:
+            return self._dpd
+        self._dpd = {}
+        if not self.drug_info_path:
+            return self._dpd
+        import pandas as pd
+        cols = ["DRUG_IDENTIFICATION_NUMBER", "BRAND_NAME", "INGREDIENT",
+                "STRENGTH", "STRENGTH_UNIT", "CLASS"]
+        df = pd.read_csv(self.drug_info_path, usecols=lambda c: c in cols, dtype=str)
+        df = df[df["DRUG_IDENTIFICATION_NUMBER"].str.fullmatch(r"\d+", na=False)].fillna("")
+        for din, g in df.groupby("DRUG_IDENTIFICATION_NUMBER"):
+            first = g.iloc[0]
+            self._dpd[int(din)] = {
+                "brand": str(first.get("BRAND_NAME", "")).strip(),
+                "ingredient": " / ".join(sorted({s for s in g["INGREDIENT"] if s})),
+                "strength": str(first.get("STRENGTH", "")).strip(),
+                "strength_unit": str(first.get("STRENGTH_UNIT", "")).strip(),
+                "class": str(first.get("CLASS", "")).strip(),
+            }
+        return self._dpd
+
+    def drug_records(self, episode_id) -> list:
+        """One record per dispensed drug for a patient, with its brand name.
+
+        Drugs are stored sparsely (CSR) like text: `drug_offsets` gives the
+        patient's slice, `drug_timesteps` the timestep of each dispensing entry,
+        and each entry has up to 30 slots. For each real slot we read the DIN,
+        dose and score, then look the DIN up in the DPD for the brand name.
+        """
+        row = self._row_for_episode(episode_id)
+        try:
+            offsets = self._load(self.data_dir, "drug_offsets")
+        except FileNotFoundError:
+            return []
+        start, end = int(offsets[row]), int(offsets[row + 1])
+        if end <= start:
+            return []
+        dins = self._load(self.data_dir, "drug_dins")
+        doses = self._load(self.data_dir, "drug_doses")
+        masks = self._load(self.data_dir, "drug_masks")
+        timesteps = self._load(self.data_dir, "drug_timesteps")
+        scores = self._load(self.xai_dir, "xai_drug")
+        dpd = self._dpd_lookup()
+
+        out = []
+        for j in range(start, end):
+            t = int(timesteps[j])
+            for k in np.nonzero(np.asarray(masks[j]) == 1.0)[0]:
+                din = int(dins[j, k])
+                info = dpd.get(din)
+                if info and info["brand"]:
+                    label = info["brand"]
+                    detail = f"{info['ingredient']} {info['strength']}{info['strength_unit']}".strip()
+                    value = f"{detail} (DIN {din})" if detail else f"DIN {din}"
+                else:
+                    label = f"DIN {din}"
+                    value = f"DIN {din}"
+                rec = self._record(episode_id, label, "drug", t,
+                                   float(self.val_times[row, t]) if t < self.val_times.shape[1] else None,
+                                   value, scores[j, k])
+                rec["din"] = din
+                rec["dose"] = round(float(doses[j, k]), 3)
+                out.append(rec)
+        return out
+
+    # ----- array data -> timeline-renderable events -----
+    def to_timeline_events(self, episode_id, admission_time=None, include_text=True) -> list:
+        """Convert this episode's array records into the shape the timeline renders.
+
+        The timeline draws events shaped like load_all_events' output
+        (patient_id / start_date / end_date / event_type / event_info /
+        source_dataset), so mapping array records into that shape lets the same
+        rendering path draw model-input data instead of raw CSV events. This is
+        the link needed before any hover/highlight work, since importance scores
+        are always with respect to the arrays, not the CSVs.
+
+        Args:
+            episode_id: patient episode to convert.
+            admission_time: the episode's real admission datetime. Array times
+                are hours relative to it. If None, calendar dates cannot be
+                recovered — start_date/end_date are left None and `time_hours`
+                carries the relative time instead. (Open question with the model
+                author: the admission timestamp isn't stored in the arrays.)
+            include_text: include note records (one event per note).
+
+        Returns:
+            List of dicts, each also carrying `score`, `feature` and `kind` so a
+            timeline item can be tied back to its importance score.
+        """
+        import pandas as pd
+
+        records = (self.numeric_records(episode_id)
+                   + self.categorical_records(episode_id)
+                   + self.ordinal_records(episode_id)
+                   + self.event_records(episode_id))
+        if include_text:
+            records += self.text_records(episode_id)
+
+        events = []
+        for r in records:
+            hours = r["time_hours"]
+            if admission_time is not None and hours is not None:
+                start = pd.Timestamp(admission_time) + pd.Timedelta(hours=hours)
+            else:
+                start = None
+            events.append({
+                "patient_id": r["episode_id"],
+                "start_date": start,
+                "end_date": start,          # array records are point-in-time
+                "time_hours": hours,        # kept so relative time survives
+                "event_type": r["kind"],    # lane: numeric / categorical / event / text ...
+                "event_info": f"{r['description']}: {r['value']}",
+                "source_dataset": "TransEHR2",
+                "feature": r["feature"],
+                "kind": r["kind"],
+                "score": r["score"],
+            })
+        events.sort(key=lambda e: (e["time_hours"] is None, e["time_hours"]))
+        return events
+
     # ----- top-N across time-associated features -----
     def top_records(self, episode_id, n: int = 15) -> list:
         """Top-n timeline records by absolute importance score.
@@ -309,6 +441,7 @@ class XaiArrayReader:
         records = (self.numeric_records(episode_id)
                    + self.categorical_records(episode_id)
                    + self.ordinal_records(episode_id)
-                   + self.event_records(episode_id))
+                   + self.event_records(episode_id)
+                   + self.drug_records(episode_id))
         records.sort(key=lambda r: abs(r["score"]), reverse=True)
         return records[:n]
