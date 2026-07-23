@@ -10,6 +10,12 @@ dependencies = [
     "numpy>=2.2.0",
     "openpyxl>=3.1.5",
     "python-dateutil>=2.9.0",
+    # XAI module: Llama tokenizer for text detokenization, .env token, YAML config.
+    # transformers is pinned <5 because 5.x needs huggingface_hub 1.x, which
+    # conflicts with the 0.34.x that gradio pins — keep them compatible.
+    "transformers>=4.44,<5",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
 ]
 
 
