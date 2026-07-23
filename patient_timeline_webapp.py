@@ -764,6 +764,7 @@ class PatientTimelineApp:
 
         th = ("padding:6px 10px;color:#111827;background:#f3f4f6;"
               "border-bottom:2px solid #d1d5db;font-weight:600;")
+        notes_html = self._xai_notes_html(reader, episode_id)
         return f"""
         <div style='max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;'>
         <table style='width:100%;border-collapse:collapse;font-size:13px;'>
@@ -777,11 +778,72 @@ class PatientTimelineApp:
             <tbody>{rows}</tbody>
         </table>
         </div>
+        {notes_html}
         <p style='color:#9ca3af;font-size:11px;padding:6px 2px 0;'>
         Synthetic test data — NOT derived from this real patient; shown only to
         develop the layout until the real model output exists. Scores are
-        placeholders; time is hours since admission; text features not shown yet.
+        placeholders; time is hours since admission.
         </p>
+        """
+
+    @staticmethod
+    def _token_style(score: float) -> str:
+        """Background shade for a token, by importance.
+
+        Colour intensity encodes magnitude (how much the token mattered); hue
+        distinguishes sign only. Deliberately not green/red: a positive score
+        does not mean "good" — the relationship between score sign and outcome
+        is not a simple one (confounding), so the palette shouldn't imply it.
+        Gradient choice is provisional, pending the front-end design work.
+        """
+        alpha = min(abs(score), 1.0) * 0.75
+        rgb = "220,38,38" if score >= 0 else "37,99,235"
+        return f"background:rgba({rgb},{alpha:.2f});border-radius:2px;"
+
+    def _xai_notes_html(self, reader, episode_id) -> str:
+        """Render clinical notes with per-token importance shading.
+
+        Notes are kept in their own section rather than ranked alongside the
+        per-feature scores: a note's score is a sum over its tokens, which isn't
+        directly comparable to a single feature's score (an open question with
+        the model author).
+        """
+        from html import escape
+        try:
+            notes = reader.text_records(episode_id)
+        except Exception as e:
+            return f"<p style='color:#ef4444;font-size:12px;padding:8px 2px;'>Could not decode notes: {escape(str(e))}</p>"
+        if not notes:
+            return ""
+
+        blocks = ""
+        for rec in notes:
+            spans = "".join(
+                f"<span style='{self._token_style(tok['score'])}' "
+                f"title='{tok['score']:+.3f}'>{escape(tok['token'])}</span>"
+                for tok in rec["tokens"] if not tok["is_special"]
+            )
+            peak = rec.get("top_token") or {}
+            blocks += (
+                "<div style='margin:8px 0;padding:8px;border:1px solid #e5e7eb;border-radius:6px;'>"
+                f"<div style='font-size:11px;color:#6b7280;margin-bottom:4px;'>"
+                f"{escape(rec['feature'])} · {rec['time_hours']:.0f} h · "
+                f"note total {rec['score_sum']:+.2f} · "
+                f"most important word: <b>{escape(str(peak.get('token','')).strip())}</b> "
+                f"({peak.get('score', 0):+.3f})</div>"
+                f"<div style='font-size:13px;line-height:1.7;'>{spans}</div>"
+                "</div>"
+            )
+
+        return f"""
+        <div style='margin-top:14px;'>
+          <div style='font-weight:600;font-size:13px;margin-bottom:4px;'>Clinical notes (per-word importance)</div>
+          <div style='font-size:11px;color:#9ca3af;margin-bottom:6px;'>
+            Shading shows how much each word mattered (stronger = more important).
+            Hue marks sign only — it does not mean good/bad. Hover a word for its score.
+          </div>
+          {blocks}
+        </div>
         """
 
     def load_patient_timeline_html(self, patient_id):
