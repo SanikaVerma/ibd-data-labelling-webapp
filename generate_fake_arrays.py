@@ -101,6 +101,35 @@ SAMPLE_NOTES = [
 ]
 
 
+# Max drug slots per dispensing entry (array width), per the XAI plan document.
+MAX_DRUGS_PER_STEP = 30
+
+# Ingredient search terms used only to pick which REAL drugs a fake IBD patient
+# might be on. The actual drug data (DIN, brand, strength) all comes from the
+# real DPD file — nothing about the drugs is fabricated, only the choice of
+# which real ones to include.
+IBD_DRUG_INGREDIENTS = [
+    "adalimumab", "infliximab", "vedolizumab", "ustekinumab", "golimumab",
+    "prednisone", "budesonide", "mesalamine", "sulfasalazine",
+    "azathioprine", "methotrexate", "tofacitinib",
+]
+
+
+def _build_drug_pool(dpd_path: str) -> list:
+    """Return a list of real DINs (ints) for IBD drugs, sampled from the DPD file.
+
+    Reads din_drug_info.csv and keeps rows whose INGREDIENT matches an IBD drug,
+    returning their DRUG_IDENTIFICATION_NUMBERs. All values are real; we only
+    choose which real drugs to include.
+    """
+    import pandas as pd
+    df = pd.read_csv(dpd_path, usecols=["DRUG_IDENTIFICATION_NUMBER", "INGREDIENT"], dtype=str)
+    pattern = "|".join(IBD_DRUG_INGREDIENTS)
+    hit = df[df["INGREDIENT"].fillna("").str.lower().str.contains(pattern)]
+    dins = sorted({int(d) for d in hit["DRUG_IDENTIFICATION_NUMBER"].dropna()})
+    return dins
+
+
 def _one_hot(idx: int, size: int) -> np.ndarray:
     v = np.zeros(size, dtype=np.int64)
     if 0 <= idx < size:
@@ -130,7 +159,8 @@ def _tokenize(tk, text: str):
     return out['input_ids'][0], out['attention_mask'][0].astype(np.float32)
 
 
-def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
+def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42,
+             dpd_path: str = "dpd_reference/din_drug_info.csv"):
     rng = np.random.default_rng(seed)
     tk = _load_tokenizer()
 
@@ -255,6 +285,54 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
         text_masks = np.zeros((0, MAX_TOKEN_LENGTH), dtype=np.float32)
         text_ts = np.zeros(0, dtype=np.int32)
 
+    # ---- drugs (sparse CSR, like text; one entry per dispensing timestep) ----
+    # Each entry holds up to MAX_DRUGS_PER_STEP drug slots. Alongside the model
+    # inputs (token IDs, doses, masks) we save a DIN array — reference metadata
+    # TransEHR2 doesn't use — so each drug can be linked to the DPD for its brand
+    # name. DINs are real, sampled from the DPD file.
+    drug_pool = _build_drug_pool(dpd_path)
+    D = MAX_DRUGS_PER_STEP
+    drug_tok_rows, drug_dose_rows, drug_mask_rows, drug_din_rows = [], [], [], []
+    drug_ts_list, drug_counts = [], []
+    for i in range(n_ep):
+        ep_len = int(ep_lens[i])
+        n_drug_this_ep = 0
+        for t in range(ep_len):
+            if rng.random() < 0.3:  # a dispensing entry at ~30% of timesteps
+                k = int(rng.integers(1, 5))  # 1-4 drugs dispensed
+                chosen = rng.choice(len(drug_pool), size=min(k, len(drug_pool)), replace=False)
+                tok = np.zeros(D, dtype=np.int64)
+                dose = np.zeros(D, dtype=np.float32)
+                mask = np.zeros(D, dtype=np.float32)
+                din = np.zeros(D, dtype=np.int64)
+                for slot, idx in enumerate(chosen):
+                    tok[slot] = int(idx)                     # stand-in ATC/embedding token id
+                    din[slot] = int(drug_pool[idx])          # real DIN -> DPD lookup
+                    dose[slot] = float(rng.uniform(0.5, 2.0))
+                    mask[slot] = 1.0
+                drug_tok_rows.append(tok)
+                drug_dose_rows.append(dose)
+                drug_mask_rows.append(mask)
+                drug_din_rows.append(din)
+                drug_ts_list.append(t)
+                n_drug_this_ep += 1
+        drug_counts.append(n_drug_this_ep)
+
+    drug_offsets = np.zeros(n_ep + 1, dtype=np.int64)
+    drug_offsets[1:] = np.cumsum(drug_counts)
+    if drug_tok_rows:
+        drug_tokens = np.stack(drug_tok_rows, axis=0)
+        drug_doses = np.stack(drug_dose_rows, axis=0)
+        drug_masks = np.stack(drug_mask_rows, axis=0)
+        drug_dins = np.stack(drug_din_rows, axis=0)
+        drug_ts = np.array(drug_ts_list, dtype=np.int32)
+    else:
+        drug_tokens = np.zeros((0, D), dtype=np.int64)
+        drug_doses = np.zeros((0, D), dtype=np.float32)
+        drug_masks = np.zeros((0, D), dtype=np.float32)
+        drug_dins = np.zeros((0, D), dtype=np.int64)
+        drug_ts = np.zeros(0, dtype=np.int32)
+
     # -----------------------------------------------------------------
     # XAI score arrays — ONE SCORE PER FEATURE PER TIMESTEP, so these
     # mirror the INDICATOR arrays. Scores are zero where nothing was
@@ -277,6 +355,10 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
     xai_text = np.zeros_like(text_values, dtype=np.float32)
     real = text_masks == 1.0
     xai_text[real] = rng.uniform(-1, 1, size=int(real.sum()))
+    # One score per real (non-padding) drug slot.
+    xai_drug = np.zeros_like(drug_doses, dtype=np.float32)
+    real_d = drug_masks == 1.0
+    xai_drug[real_d] = rng.uniform(-1, 1, size=int(real_d.sum()))
 
     # -----------------------------------------------------------------
     # Write to disk
@@ -313,6 +395,13 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
         save(train_dir, f"val_text_values_{f}", text_values)
         save(train_dir, f"val_text_masks_{f}", text_masks)
         save(train_dir, f"val_text_timesteps_{f}", text_ts)
+    # Drug arrays (model inputs + the DIN metadata array)
+    save(train_dir, "drug_offsets", drug_offsets)
+    save(train_dir, "drug_timesteps", drug_ts)
+    save(train_dir, "drug_token_ids", drug_tokens)
+    save(train_dir, "drug_doses", drug_doses)
+    save(train_dir, "drug_masks", drug_masks)
+    save(train_dir, "drug_dins", drug_dins)
 
     with open(train_dir / "metadata.pkl", "wb") as fh:
         pickle.dump({
@@ -331,6 +420,7 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
     save(xai_dir, "xai_ordinal", xai_ordinal)
     save(xai_dir, "xai_event", xai_event)
     save(xai_dir, "xai_static", xai_static)
+    save(xai_dir, "xai_drug", xai_drug)
     for f in range(n_txt):
         save(xai_dir, f"xai_text_{f}", xai_text)
 
@@ -363,6 +453,8 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
         "STATIC_FEATS": [f[0] for f in STATIC_FEATS],
         "MAX_EPISODE_LEN_STEPS": max_ts,
         "MAX_HISTORY_LEN_STEPS": 0,
+        # Where the reader finds the DPD file for DIN -> brand-name lookup.
+        "DRUG_INFO_PATH": str(dpd_path),
     }
     with open(out_dir / "dataset_config.yaml", "w") as fh:
         yaml.safe_dump(dataset_config, fh, sort_keys=False)
@@ -376,6 +468,8 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42):
     print(f"  static:        {[f[0] for f in STATIC_FEATS]} -> xai_static {xai_static.shape}")
     print(f"  text:          {[f[0] for f in TEXT_FEATS]} -> xai_text_0 {xai_text.shape} "
           f"({len(text_values)} notes, real Llama tokenizer, {MAX_TOKEN_LENGTH} tokens)")
+    print(f"  drug:          {len(drug_pool)} real IBD DINs in pool -> xai_drug {xai_drug.shape} "
+          f"({len(drug_dins)} dispensing entries, DIN array for DPD lookup)")
 
 
 def main():
@@ -384,8 +478,11 @@ def main():
     parser.add_argument("--n_episodes", type=int, default=3)
     parser.add_argument("--max_ts", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dpd_path", default="dpd_reference/din_drug_info.csv",
+                        help="Path to din_drug_info.csv (DPD) to sample real DINs from")
     args = parser.parse_args()
-    generate(Path(args.out), n_ep=args.n_episodes, max_ts=args.max_ts, seed=args.seed)
+    generate(Path(args.out), n_ep=args.n_episodes, max_ts=args.max_ts, seed=args.seed,
+             dpd_path=args.dpd_path)
 
 
 if __name__ == "__main__":
