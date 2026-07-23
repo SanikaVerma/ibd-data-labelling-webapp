@@ -704,6 +704,138 @@ class PatientTimelineApp:
 
         return info
 
+    def _xai_reader_and_episode(self, patient_id):
+        """Build an XaiArrayReader from study_config and resolve the episode id.
+
+        Returns (reader, episode_id), or (None, None) if unavailable. Shared by
+        the importance list and the note-detail view so both read the same data.
+        """
+        if not patient_id:
+            return None, None
+        from xai_arrays import XaiArrayReader
+        cfg = (_load_study_config().get("xai_arrays")) or {}
+        base_dir = cfg.get("dir")
+        if not base_dir:
+            return None, None
+        try:
+            reader = XaiArrayReader(base_dir, cfg.get("suffix", "train"))
+        except Exception:
+            return None, None
+        try:
+            episode_id = int(patient_id)
+        except (ValueError, TypeError):
+            episode_id = patient_id
+        if episode_id not in reader.episode_ids:
+            return None, None
+        return reader, episode_id
+
+    def note_choices(self, patient_id):
+        """Dropdown choices for the note-detail view: (label, note_index) pairs."""
+        reader, episode_id = self._xai_reader_and_episode(patient_id)
+        if reader is None:
+            return []
+        try:
+            notes = reader.text_records(episode_id)
+        except Exception:
+            return []
+        choices = []
+        for i, rec in enumerate(notes):
+            t = rec.get("time_hours")
+            when = f"{t:.0f} h" if t is not None else "?"
+            choices.append((f"Note {i + 1} — {rec['feature']} @ {when} "
+                            f"(total {rec['score_sum']:+.2f})", i))
+        return choices
+
+    def note_detail_html(self, patient_id, note_idx):
+        """Full per-word importance heat-map for one selected note (detail pane)."""
+        from html import escape
+        if note_idx is None or note_idx == "":
+            return "<p style='color:#6b7280;padding:12px;'>Select a note above to see its per-word importance.</p>"
+        reader, episode_id = self._xai_reader_and_episode(patient_id)
+        if reader is None:
+            return ""
+        try:
+            notes = reader.text_records(episode_id)
+            rec = notes[int(note_idx)]
+        except (IndexError, ValueError, Exception):
+            return "<p style='color:#6b7280;padding:12px;'>Note not available.</p>"
+
+        words = [t for t in rec["tokens"] if not t["is_special"]]
+        spans = "".join(
+            f"<span style='{self._token_style(t['score'])}' title='{t['score']:+.3f}'>{escape(t['token'])}</span>"
+            for t in words
+        )
+        top = sorted(words, key=lambda t: abs(t["score"]), reverse=True)[:8]
+        top_rows = "".join(
+            f"<tr><td style='padding:3px 10px;'>{t['score']:+.3f}</td>"
+            f"<td style='padding:3px 10px;'>{escape(t['token'].strip())}</td></tr>"
+            for t in top
+        )
+        return f"""
+        <div style='border:1px solid #e5e7eb;border-radius:8px;padding:12px;'>
+          <div style='font-size:12px;color:#6b7280;margin-bottom:8px;'>
+            {escape(rec['feature'])} · {rec['time_hours']:.0f} h · note total {rec['score_sum']:+.2f}
+          </div>
+          <div style='font-size:15px;line-height:1.9;margin-bottom:12px;'>{spans}</div>
+          <div style='font-weight:600;font-size:12px;margin-bottom:4px;'>Most important words in this note</div>
+          <table style='font-size:12px;border-collapse:collapse;'>{top_rows}</table>
+          <p style='color:#9ca3af;font-size:11px;margin-top:8px;'>
+            Shading = importance magnitude; hue = sign only (not good/bad). Hover a word for its score.
+            Words may be sub-word pieces (e.g. "Cro" + "hn"); read in context.
+          </p>
+        </div>
+        """
+
+    def get_xai_timeline_fig(self, patient_id):
+        """A simple Plotly timeline of the XAI array items for a patient.
+
+        Illustrates "array data rendered on a timeline": each recorded item is a
+        dot placed by its time (hours since admission), in a lane by kind, sized
+        and coloured by importance magnitude. Plotly's native hover highlights an
+        item and shows its details — the basic version of the select/hover ->
+        highlight interaction (polished later in the JavaScript front end).
+
+        Both this timeline and the importance list come from the SAME arrays, so
+        they genuinely correspond — when real model output + admission timestamps
+        arrive, the same approach maps straight onto the real dated timeline.
+        """
+        reader, episode_id = self._xai_reader_and_episode(patient_id)
+        if reader is None:
+            return None
+        events = reader.to_timeline_events(episode_id)
+        events = [e for e in events if e.get("time_hours") is not None]
+        if not events:
+            return None
+
+        lanes = ["numeric", "categorical", "ordinal", "event", "drug", "text"]
+        fig = go.Figure()
+        for kind in lanes:
+            evs = [e for e in events if e["kind"] == kind]
+            if not evs:
+                continue
+            fig.add_trace(go.Scatter(
+                x=[e["time_hours"] for e in evs],
+                y=[kind] * len(evs),
+                mode="markers",
+                marker=dict(
+                    size=[8 + 22 * min(abs(e["score"]), 1.0) for e in evs],
+                    color=[e["score"] for e in evs],
+                    cmin=-1, cmax=1, colorscale="RdBu", reversescale=True,
+                    line=dict(width=1, color="#555"),
+                ),
+                text=[f"{e['feature']}<br>{e['event_info']}<br>score {e['score']:+.3f}"
+                      for e in evs],
+                hovertemplate="%{text}<extra></extra>",
+                name=kind,
+            ))
+        fig.update_layout(
+            title="XAI items on a timeline (hover to highlight)",
+            xaxis_title="Hours since admission",
+            yaxis=dict(categoryorder="array", categoryarray=lanes[::-1]),
+            height=340, margin=dict(l=90, r=20, t=40, b=40), showlegend=False,
+        )
+        return fig
+
     def get_xai_list_html(self, patient_id, n=15):
         """
         Render the top-n importance-scored items for a patient as a simple HTML list.
