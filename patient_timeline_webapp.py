@@ -786,33 +786,49 @@ class PatientTimelineApp:
         </div>
         """
 
-    def get_xai_timeline_fig(self, patient_id):
+    def _xai_timeline_events(self, patient_id):
+        """Top XAI items for a patient as timeline events (time-associated only),
+        sorted by absolute score — the order used by both the selector and chart."""
+        reader, episode_id = self._xai_reader_and_episode(patient_id)
+        if reader is None:
+            return []
+        events = [e for e in reader.to_timeline_events(episode_id)
+                  if e.get("time_hours") is not None]
+        events.sort(key=lambda e: abs(e["score"]), reverse=True)
+        return events
+
+    def xai_item_choices(self, patient_id):
+        """Dropdown choices for the timeline highlight: (label, item_index)."""
+        choices = []
+        for i, e in enumerate(self._xai_timeline_events(patient_id)):
+            choices.append((f"{e['score']:+.2f}  {e['kind']}: {e['feature']} "
+                            f"@ {e['time_hours']:.0f} h", i))
+        return choices
+
+    def get_xai_timeline_fig(self, patient_id, highlight_idx=None):
         """A simple Plotly timeline of the XAI array items for a patient.
 
-        Illustrates "array data rendered on a timeline": each recorded item is a
-        dot placed by its time (hours since admission), in a lane by kind, sized
-        and coloured by importance magnitude. Plotly's native hover highlights an
-        item and shows its details — the basic version of the select/hover ->
-        highlight interaction (polished later in the JavaScript front end).
+        Each recorded item is a dot placed by its time (hours since admission),
+        in a lane by kind, sized and coloured by importance. Selecting an item
+        (highlight_idx) rings and enlarges its dot — the basic "select an item ->
+        it highlights on the timeline" interaction he described, done in Python;
+        the polished click-driven version comes with the JavaScript front end.
 
         Both this timeline and the importance list come from the SAME arrays, so
         they genuinely correspond — when real model output + admission timestamps
         arrive, the same approach maps straight onto the real dated timeline.
         """
-        reader, episode_id = self._xai_reader_and_episode(patient_id)
-        if reader is None:
-            return None
-        events = reader.to_timeline_events(episode_id)
-        events = [e for e in events if e.get("time_hours") is not None]
+        events = self._xai_timeline_events(patient_id)
         if not events:
             return None
 
         lanes = ["numeric", "categorical", "ordinal", "event", "drug", "text"]
         fig = go.Figure()
         for kind in lanes:
-            evs = [e for e in events if e["kind"] == kind]
-            if not evs:
+            idxs = [i for i, e in enumerate(events) if e["kind"] == kind]
+            if not idxs:
                 continue
+            evs = [events[i] for i in idxs]
             fig.add_trace(go.Scatter(
                 x=[e["time_hours"] for e in evs],
                 y=[kind] * len(evs),
@@ -828,8 +844,19 @@ class PatientTimelineApp:
                 hovertemplate="%{text}<extra></extra>",
                 name=kind,
             ))
+
+        # Highlight the selected item: a ring around its dot.
+        if highlight_idx is not None and highlight_idx != "" and 0 <= int(highlight_idx) < len(events):
+            e = events[int(highlight_idx)]
+            fig.add_trace(go.Scatter(
+                x=[e["time_hours"]], y=[e["kind"]], mode="markers",
+                marker=dict(size=34, color="rgba(0,0,0,0)",
+                            line=dict(width=3, color="#111827")),
+                hoverinfo="skip", showlegend=False,
+            ))
+
         fig.update_layout(
-            title="XAI items on a timeline (hover to highlight)",
+            title="XAI items on a timeline (hover, or select an item below to highlight)",
             xaxis_title="Hours since admission",
             yaxis=dict(categoryorder="array", categoryarray=lanes[::-1]),
             height=340, margin=dict(l=90, r=20, t=40, b=40), showlegend=False,
