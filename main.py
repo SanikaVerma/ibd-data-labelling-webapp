@@ -407,6 +407,20 @@ def create_interface():
                             value="<p style='color:#6b7280;padding:12px;'>"
                                   "Select a patient to see importance scores.</p>"
                         )
+                        gr.Markdown("#### Clinical note detail")
+                        note_selector = gr.Dropdown(
+                            label="Select a note to view its per-word importance",
+                            choices=[], value=None, interactive=True
+                        )
+                        note_detail = gr.HTML(
+                            value="<p style='color:#6b7280;padding:12px;'>"
+                                  "Select a note above to see its per-word importance.</p>"
+                        )
+
+                # XAI items rendered on a (relative-hours) timeline — array data
+                # drawn on a timeline, with Plotly's native hover-to-highlight.
+                gr.Markdown("### XAI items on a timeline (hover to highlight)")
+                xai_timeline = gr.Plot()
 
                 # Chart information panel - shows patient stats and flare summaries
                 chart_info = gr.Textbox(label="Chart Information", value="No patient data loaded",
@@ -715,11 +729,23 @@ def create_interface():
         # EVENT HANDLERS - TIMELINE VIEWER TAB
         # ====================================================================
         
+        # Refresh the note-detail dropdown for the selected patient, and reset
+        # the detail pane. Chained after the timeline loads.
+        def _refresh_notes(patient_id):
+            choices = app.note_choices(patient_id)
+            reset = ("<p style='color:#6b7280;padding:12px;'>"
+                     "Select a note above to see its per-word importance.</p>")
+            return gr.update(choices=choices, value=None), reset
+
         # Load timeline button — returns HTML/JS with filter buttons embedded
         load_timeline_btn.click(
             app.load_patient_timeline_html,
             inputs=[patient_dropdown],
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
+        ).then(
+            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_detail]
+        ).then(
+            app.get_xai_timeline_fig, inputs=[patient_dropdown], outputs=[xai_timeline]
         )
 
         # Auto-load when patient dropdown changes
@@ -727,6 +753,17 @@ def create_interface():
             app.load_patient_timeline_html,
             inputs=[patient_dropdown],
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
+        ).then(
+            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_detail]
+        ).then(
+            app.get_xai_timeline_fig, inputs=[patient_dropdown], outputs=[xai_timeline]
+        )
+
+        # Show a note's per-word heat-map when it's selected
+        note_selector.change(
+            app.note_detail_html,
+            inputs=[patient_dropdown, note_selector],
+            outputs=[note_detail]
         )
         
         # ====================================================================
