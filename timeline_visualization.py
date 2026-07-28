@@ -904,7 +904,7 @@ _TIMELINE_IFRAME_INNER = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<script>__PLOTLY_JS__</script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family:Inter,Arial,sans-serif; background:white; }
@@ -1140,9 +1140,17 @@ _TIMELINE_HTML_TEMPLATE = """
             paper_bgcolor:'white'
         };
 
-        Plotly.newPlot('ptv-plot', traces, layout,
-            { responsive:true, displayModeBar:true,
-              modeBarButtonsToRemove:['select2d','lasso2d'] });
+        try {
+            Plotly.newPlot('ptv-plot', traces, layout,
+                { responsive:true, displayModeBar:true,
+                  modeBarButtonsToRemove:['select2d','lasso2d'] });
+        } catch (err) {
+            if (window.console) console.error('ptv renderChart error:', err);
+            var el = document.getElementById('ptv-plot');
+            if (el) el.innerHTML = "<pre style='color:#b91c1c;padding:12px;"
+                + "white-space:pre-wrap;font:12px monospace;'>Chart failed to render:\n"
+                + (err && err.message ? err.message : err) + "</pre>";
+        }
     }
 
     window.ptvSetFilter = function(filter) {
@@ -1156,19 +1164,21 @@ _TIMELINE_HTML_TEMPLATE = """
     };
 
     function init() {
+        // Plotly.js is inlined in <head> above, so it loads with the document
+        // (no CDN request, which browsers block from an srcdoc iframe). If it
+        // isn't ready on the first tick, poll briefly until it is, then give up
+        // with a visible message rather than a silent blank.
         if (window.Plotly) { renderChart('all'); return; }
-        // If CDN script is already injected but not yet loaded, wait for it
-        if (document.querySelector('script[src*="plotly"]')) {
-            var iv = setInterval(function() {
-                if (window.Plotly) { clearInterval(iv); renderChart('all'); }
-            }, 100);
-            return;
-        }
-        // First time: inject CDN script
-        var s = document.createElement('script');
-        s.src = 'https://cdn.plot.ly/plotly-2.35.0.min.js';
-        s.onload = function() { renderChart('all'); };
-        document.head.appendChild(s);
+        var tries = 0;
+        var iv = setInterval(function() {
+            if (window.Plotly) { clearInterval(iv); renderChart('all'); return; }
+            if (++tries > 100) {   // ~5s
+                clearInterval(iv);
+                var el = document.getElementById('ptv-plot');
+                if (el) el.innerHTML = "<pre style='color:#b91c1c;padding:12px;"
+                    + "font:12px monospace;'>Plotly.js did not load.</pre>";
+            }
+        }, 50);
     }
 
     setTimeout(init, 80);
@@ -1177,12 +1187,35 @@ _TIMELINE_HTML_TEMPLATE = """
 """
 
 
+_PLOTLY_JS_CACHE = None
+
+
+def _load_plotly_js():
+    """Return the bundled Plotly.js source, cached after the first read.
+
+    Plotly is inlined into the iframe rather than pulled from a CDN: an srcdoc
+    iframe has an opaque origin, so browsers (notably VS Code's webview) block
+    its external script requests, which left the chart blank. We use the copy
+    that ships with the installed plotly package, so there's no network need.
+    Any literal "</script" is defanged so it can't close the inline <script>.
+    """
+    global _PLOTLY_JS_CACHE
+    if _PLOTLY_JS_CACHE is None:
+        import os
+        import plotly as _plotly
+        p = os.path.join(os.path.dirname(_plotly.__file__),
+                         'package_data', 'plotly.min.js')
+        with open(p, 'r') as f:
+            _PLOTLY_JS_CACHE = f.read().replace('</script', '<\\/script')
+    return _PLOTLY_JS_CACHE
+
+
 def build_timeline_html(app):
     """Return an iframe wrapping a self-contained Plotly.js timeline document.
 
     Reads static/timeline.js and inlines it so the supervisor can see a real
-    JS file while the iframe remains fully self-contained (no external URL
-    requests from srcdoc, which browsers restrict).
+    JS file, and inlines Plotly.js too, so the iframe is fully self-contained
+    with no external URL requests (which browsers restrict from srcdoc).
     """
     import html as _html
     import os
@@ -1193,13 +1226,20 @@ def build_timeline_html(app):
 
     events, flares = _serialize_patient_data(app)
     inner = _TIMELINE_IFRAME_INNER \
+        .replace('__PLOTLY_JS__', _load_plotly_js()) \
         .replace('__EVENTS_JSON__', json.dumps(events)) \
         .replace('__FLARES_JSON__', json.dumps(flares)) \
         .replace('__TIMELINE_JS__', timeline_js)
 
     srcdoc = _html.escape(inner, quote=True)
+    # A fresh nonce per render forces Gradio/the browser to mount a NEW iframe
+    # element rather than reuse the previous one and just swap `srcdoc` (which
+    # can leave the chart blank on the second patient — the iframe doesn't
+    # re-execute its scripts on an in-place srcdoc change).
+    import uuid
+    nonce = uuid.uuid4().hex
     return (
-        f'<iframe srcdoc="{srcdoc}" '
+        f'<iframe srcdoc="{srcdoc}" data-render="{nonce}" '
         f'style="width:100%;height:880px;border:none;display:block;">'
         f'</iframe>'
     )

@@ -195,17 +195,11 @@ window.setF = function(filter) {
     renderChart(filter);
 };
 
-// Load Plotly: try parent window first (Gradio loads it for chart components),
-// then fall back to the CDN script already in <head>.
+// Load Plotly: use the copy inlined into this iframe's <head>. We deliberately
+// do NOT borrow window.parent.Plotly — drawing into this iframe's div with the
+// parent page's Plotly instance renders cross-document and comes out blank on
+// the second load (once Gradio has lazy-loaded its own Plotly for other charts).
 function initPlotly() {
-    try {
-        if (window.parent && window.parent.Plotly) {
-            window.Plotly = window.parent.Plotly;
-            renderChart('all');
-            return;
-        }
-    } catch (e) {}
-
     if (typeof Plotly !== 'undefined') {
         renderChart('all');
         return;
