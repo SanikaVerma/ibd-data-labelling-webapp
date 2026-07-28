@@ -407,24 +407,12 @@ def create_interface():
                             value="<p style='color:#6b7280;padding:12px;'>"
                                   "Select a patient to see importance scores.</p>"
                         )
-                        gr.Markdown("#### Clinical note detail")
+                        gr.Markdown("#### Clinical note — words by importance")
                         note_selector = gr.Dropdown(
-                            label="Select a note to view its per-word importance",
+                            label="Select a note",
                             choices=[], value=None, interactive=True
                         )
-                        note_detail = gr.HTML(
-                            value="<p style='color:#6b7280;padding:12px;'>"
-                                  "Select a note above to see its per-word importance.</p>"
-                        )
-
-                # XAI items rendered on a (relative-hours) timeline — array data
-                # drawn on a timeline, with hover + select-to-highlight.
-                gr.Markdown("### XAI items on a timeline")
-                xai_timeline = gr.Plot()
-                xai_item_selector = gr.Dropdown(
-                    label="Select an item to highlight it on the timeline",
-                    choices=[], value=None, interactive=True
-                )
+                        note_gradient = gr.Plot()
 
                 # Chart information panel - shows patient stats and flare summaries
                 chart_info = gr.Textbox(label="Chart Information", value="No patient data loaded",
@@ -733,17 +721,11 @@ def create_interface():
         # EVENT HANDLERS - TIMELINE VIEWER TAB
         # ====================================================================
         
-        # Refresh the note-detail dropdown for the selected patient, and reset
-        # the detail pane. Chained after the timeline loads.
+        # Refresh the note dropdown when the patient changes; always (re)draw the
+        # gradient bar — empty (with a message) until a note is selected.
         def _refresh_notes(patient_id):
-            choices = app.note_choices(patient_id)
-            reset = ("<p style='color:#6b7280;padding:12px;'>"
-                     "Select a note above to see its per-word importance.</p>")
-            return gr.update(choices=choices, value=None), reset
-
-        # Refresh the timeline-highlight item selector when the patient changes.
-        def _refresh_xai_items(patient_id):
-            return gr.update(choices=app.xai_item_choices(patient_id), value=None)
+            return (gr.update(choices=app.note_choices(patient_id), value=None),
+                    app.get_note_gradient_fig(patient_id, None))
 
         # Load timeline button — returns HTML/JS with filter buttons embedded
         load_timeline_btn.click(
@@ -751,11 +733,7 @@ def create_interface():
             inputs=[patient_dropdown],
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
         ).then(
-            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_detail]
-        ).then(
-            app.get_xai_timeline_fig, inputs=[patient_dropdown], outputs=[xai_timeline]
-        ).then(
-            _refresh_xai_items, inputs=[patient_dropdown], outputs=[xai_item_selector]
+            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_gradient]
         )
 
         # Auto-load when patient dropdown changes
@@ -764,27 +742,16 @@ def create_interface():
             inputs=[patient_dropdown],
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
         ).then(
-            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_detail]
-        ).then(
-            app.get_xai_timeline_fig, inputs=[patient_dropdown], outputs=[xai_timeline]
-        ).then(
-            _refresh_xai_items, inputs=[patient_dropdown], outputs=[xai_item_selector]
+            _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_gradient]
         )
 
-        # Show a note's per-word heat-map when it's selected
+        # Draw the gradient bar for the selected note.
         note_selector.change(
-            app.note_detail_html,
+            app.get_note_gradient_fig,
             inputs=[patient_dropdown, note_selector],
-            outputs=[note_detail]
+            outputs=[note_gradient]
         )
 
-        # Highlight the selected item on the XAI timeline
-        xai_item_selector.change(
-            app.get_xai_timeline_fig,
-            inputs=[patient_dropdown, xai_item_selector],
-            outputs=[xai_timeline]
-        )
-        
         # ====================================================================
         # EVENT HANDLERS - LABELLING MODE TAB
         # ====================================================================
