@@ -95,6 +95,13 @@ class XaiArrayReader:
         self.num_means, self.num_p5, self.num_p95 = stats["means"], stats["p5"], stats["p95"]
 
         self.val_times = self._load(self.data_dir, "val_times")
+        # Absolute admission datetime per episode (row-aligned), if the extractor
+        # wrote it (index_times.npy). Lets us recover real dates: event datetime =
+        # index_time + time_hours. None when absent (older arrays) -> show hours.
+        try:
+            self.index_times = np.load(self.data_dir / "index_times.npy")
+        except FileNotFoundError:
+            self.index_times = None
         self._tokenizer = None  # loaded lazily — only text needs it
 
     # ----- helpers -----
@@ -117,6 +124,25 @@ class XaiArrayReader:
             return self.episode_ids.index(episode_id)
         except ValueError:
             raise ValueError(f"episode_id {episode_id} not found in {self.suffix}_ids.pkl")
+
+    def index_time(self, episode_id):
+        """Absolute admission datetime (pandas Timestamp) for this episode, or
+        None if index_times.npy wasn't written (then times stay relative hours)."""
+        if self.index_times is None:
+            return None
+        import pandas as pd
+        return pd.Timestamp(self.index_times[self._row_for_episode(episode_id)])
+
+    def event_datetime(self, episode_id, time_hours):
+        """Real datetime of an event = index_time + time_hours, or None if there's
+        no index_times / no time."""
+        if time_hours is None:
+            return None
+        idx = self.index_time(episode_id)
+        if idx is None:
+            return None
+        import pandas as pd
+        return idx + pd.Timedelta(hours=float(time_hours))
 
     def _cat_map(self, feat: str) -> dict:
         cmap = self.var_props[feat].get("category_map", {}) or {}

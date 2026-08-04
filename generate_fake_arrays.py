@@ -376,6 +376,17 @@ def generate(out_dir: Path, n_ep: int = 3, max_ts: int = 12, seed: int = 42,
     save(train_dir, "val_ordinal_indicators", ord_ind)
     save(train_dir, "val_text_indicators", txt_ind)
     save(train_dir, "val_times", val_times)
+    # Absolute admission datetime per episode (row-aligned), mirroring the real
+    # extractor's index_times.npy. Real event datetime = index_time + time_hours;
+    # val_times/event_times stay relative (hours). Lets the viewer show real dates.
+    _base = np.datetime64("2023-01-01T08:00")
+    index_times = np.array(
+        [_base + np.timedelta64(int(rng.integers(0, 900)), "D")
+               + np.timedelta64(int(rng.integers(0, 1440)), "m")
+         for _ in range(n_ep)],
+        dtype="datetime64[ns]",
+    )
+    save(train_dir, "index_times", index_times)
     save(train_dir, "val_masks", val_masks)
     save(train_dir, "event_indicators", evt_ind)
     save(train_dir, "event_times", evt_times)
