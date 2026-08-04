@@ -751,7 +751,13 @@ class PatientTimelineApp:
         rows = ""
         for it in items:
             hrs = it["time_hours"]
-            time_str = f"{hrs:.0f} h" if hrs is not None else ""
+            dt = reader.event_datetime(episode_id, hrs)
+            if dt is not None:
+                time_str = dt.strftime("%Y-%m-%d %H:%M")
+            elif hrs is not None:
+                time_str = f"{hrs:.0f} h"
+            else:
+                time_str = ""
             rows += (
                 "<tr>"
                 f"<td style='padding:6px 10px;'>{it['score']:+.3f}</td>"
@@ -780,7 +786,8 @@ class PatientTimelineApp:
         <p style='color:#9ca3af;font-size:11px;padding:6px 2px 0;'>
         Synthetic test data — NOT derived from this real patient; shown only to
         develop the layout until the real model output exists. Scores are
-        placeholders; time is hours since admission.
+        placeholders; time is the real datetime (admission time + offset) when the
+        arrays include index_times, otherwise hours since admission.
         </p>
         """
 
@@ -820,7 +827,9 @@ class PatientTimelineApp:
         choices = []
         for i, rec in enumerate(notes):
             t = rec.get("time_hours")
-            when = f"{t:.0f} h" if t is not None else "?"
+            dt = reader.event_datetime(episode_id, t)
+            when = (dt.strftime("%Y-%m-%d") if dt is not None
+                    else (f"{t:.0f} h" if t is not None else "?"))
             choices.append((f"Note {i + 1} — {rec['feature']} @ {when}", i))
         return choices
 
@@ -866,17 +875,25 @@ class PatientTimelineApp:
                 words, rec = [], None
 
         scores = np.array([w["score"] for w in words], dtype=float)
-        vmax = float(np.max(np.abs(scores))) if words else 1.0
-        vmax = vmax or 1.0
+        # Normalise by the note's spread around zero (RMS) rather than its single
+        # largest word, so colour reflects how much a word stands out from the
+        # note's typical magnitude — robust to one outlier, and keeping 0 as the
+        # neutral (white) centre. ~2x RMS saturates to full colour; beyond that
+        # clips. Scale-free, so it works at whatever magnitude real scores are.
+        if len(scores):
+            rms = float(np.sqrt(np.mean(scores ** 2))) or 1.0
+            norm = np.clip(scores / (2.0 * rms), -1.0, 1.0)
+        else:
+            norm = scores
         lanes = 5
 
         fig = go.Figure()
 
         # The gradient bar: a horizontal blue -> white -> red strip.
-        grid = np.linspace(-vmax, vmax, 201)
+        grid = np.linspace(-1.0, 1.0, 201)
         fig.add_trace(go.Heatmap(
             x=grid, y=[0, 1], z=[grid.tolist(), grid.tolist()],
-            zmin=-vmax, zmax=vmax, zmid=0,
+            zmin=-1.0, zmax=1.0, zmid=0,
             colorscale=[[0.0, "rgb(37,99,235)"], [0.5, "rgb(245,245,245)"],
                         [1.0, "rgb(220,38,38)"]],
             showscale=False, hoverinfo="skip",
@@ -885,12 +902,12 @@ class PatientTimelineApp:
         # Words placed under their score, staggered into lanes to avoid overlap.
         # Hover shows the score, not the word.
         if words:
-            order = list(np.argsort(scores))           # left (neg) -> right (pos)
+            order = list(np.argsort(norm))             # left (neg) -> right (pos)
             lane_of = {int(idx): rank % lanes for rank, idx in enumerate(order)}
             ys = [-(1.0 + lane_of[i]) for i in range(len(words))]
-            colors = [self._div_text_color(s / vmax) for s in scores]
+            colors = [self._div_text_color(n) for n in norm]
             fig.add_trace(go.Scatter(
-                x=scores, y=ys, mode="text",
+                x=norm, y=ys, mode="text",
                 text=[(w["token"].strip() or w["token"]) for w in words],
                 textfont=dict(color=colors, size=13),
                 hovertext=[f"{w['score']:+.3f}" for w in words],
@@ -905,18 +922,23 @@ class PatientTimelineApp:
         # Importance labels sit ABOVE the bar (just under the plot title), with a
         # clear gap so they don't touch the gradient strip.
         y_bottom = -(1.0 + (lanes - 1))
-        for xpos, label in [(-vmax, "important"), (0, "not important"),
-                            (vmax, "important")]:
+        for xpos, label in [(-1.0, "important"), (0, "not important"),
+                            (1.0, "important")]:
             fig.add_annotation(x=xpos, y=1.8, text=label, showarrow=False,
                                font=dict(size=11, color="#6b7280"))
 
-        title = (f"{rec['feature']} @ {rec['time_hours']:.0f} h — words by importance"
-                 if rec else "Clinical note — words by importance")
+        if rec:
+            dt = reader.event_datetime(episode_id, rec["time_hours"])
+            when = (dt.strftime("%Y-%m-%d %H:%M") if dt is not None
+                    else f"{rec['time_hours']:.0f} h")
+            title = f"{rec['feature']} @ {when} — words by importance"
+        else:
+            title = "Clinical note — words by importance"
         fig.update_layout(
             title=title, height=300, margin=dict(l=20, r=20, t=40, b=20),
             # Match the timeline viewer's font.
             font=dict(family="Inter, Arial, sans-serif"),
-            xaxis=dict(range=[-vmax * 1.15, vmax * 1.15], showticklabels=False,
+            xaxis=dict(range=[-1.15, 1.15], showticklabels=False,
                        zeroline=False, showgrid=False),
             yaxis=dict(range=[y_bottom - 0.6, 2.1], showticklabels=False,
                        zeroline=False, showgrid=False),
