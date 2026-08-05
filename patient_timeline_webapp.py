@@ -951,6 +951,105 @@ class PatientTimelineApp:
         )
         return fig
 
+    # ----- readmission probability curve (per patient) -----
+    # Fixed time points the curve, ticks and table share.
+    _READMIT_POINTS = [("30 days", 30), ("3 months", 91),
+                       ("6 months", 182), ("1 year", 365)]
+
+    def _readmission_curve(self, patient_id):
+        """Synthetic per-patient readmission-probability decay.
+
+        Returns (t_days, prob, fixed): a dense smooth curve plus the probability
+        at each fixed point. PLACEHOLDER until the model's real per-time-bin
+        probabilities exist — then the curve becomes a spline through those bins
+        (the model outputs one probability per bin; the spline fills between them
+        for an accurate read-off at any time). The shape here (high early, decays
+        toward zero) matches the sketch.
+        """
+        import numpy as np
+        try:
+            seed = int(patient_id)
+        except (TypeError, ValueError):
+            seed = abs(hash(patient_id)) % (2 ** 31)
+        rng = np.random.default_rng(seed)
+        # Probability the patient is NOT readmitted (survival). Starts at 100%
+        # (everyone is out of hospital at discharge) and declines. Weibull
+        # survival exp(-(t/tau)^k): S(0)=1 exactly; k>1 gives the flat-high start
+        # then decline in the sketch; `floor` is the long-run readmission-free
+        # probability. Placeholder shape until the model's real curve exists.
+        tau = float(rng.uniform(120, 260))      # scale (days) — when it drops
+        k = float(rng.uniform(1.4, 2.2))        # shape > 1 -> flat start, then S-curve
+        floor = float(rng.uniform(0.0, 0.12))   # long-run readmission-free probability
+
+        def p(days):
+            return floor + (1.0 - floor) * np.exp(-(np.asarray(days, float) / tau) ** k)
+
+        t = np.linspace(0, 730, 400)
+        prob = p(t)
+        fixed = [(lab, d, float(p(d))) for lab, d in self._READMIT_POINTS]
+        return t, prob, fixed
+
+    def get_readmission_fig(self, patient_id):
+        """Interactive per-patient readmission curve: a smooth decay with fixed
+        time markers and a cursor that reads off the probability (like a stock
+        chart). Synthetic placeholder until real per-bin probabilities exist."""
+        if not patient_id:
+            return None
+        t, prob, fixed = self._readmission_curve(patient_id)
+        ticks_d = [d for _, d in self._READMIT_POINTS]
+        ticks_t = ["30d", "3mo", "6mo", "1yr"]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=t, y=prob, mode="lines",
+            line=dict(color="#2563eb", width=2.5, shape="spline"),
+            hovertemplate="%{x:.0f} d — %{y:.1%}<extra></extra>",
+        ))
+        # Fixed vertical reference lines at 30d / 3mo / 6mo / 1yr.
+        for d in ticks_d:
+            fig.add_vline(x=d, line=dict(color="#cbd5e1", width=1, dash="dash"))
+
+        fig.update_layout(
+            title="Probability the patient is not readmitted",
+            height=280, margin=dict(l=55, r=20, t=40, b=40),
+            font=dict(family="Inter, Arial, sans-serif"),
+            xaxis=dict(title="Time since discharge", range=[0, 730],
+                       tickmode="array", tickvals=ticks_d, ticktext=ticks_t,
+                       showspikes=True, spikemode="across", spikethickness=1,
+                       spikedash="dot", spikecolor="#94a3b8", showgrid=False),
+            yaxis=dict(title="P(not readmitted)", range=[0, 1], tickformat=".0%",
+                       showgrid=True, gridcolor="#f1f5f9"),
+            hovermode="x", showlegend=False, plot_bgcolor="white",
+            modebar=dict(orientation="h",
+                         remove=["select2d", "lasso2d", "zoomIn2d", "zoomOut2d",
+                                 "autoScale2d", "zoom2d", "pan2d"]),
+        )
+        return fig
+
+    def get_readmission_table_html(self, patient_id):
+        """Fixed table of readmission probability at 30d / 3mo / 6mo / 1yr."""
+        if not patient_id:
+            return "<p style='color:#6b7280;padding:8px;'>Select a patient.</p>"
+        _, _, fixed = self._readmission_curve(patient_id)
+        rows = "".join(
+            f"<tr><td style='padding:5px 16px;'>{lab}</td>"
+            f"<td style='padding:5px 16px;'>{p:.1%}</td></tr>"
+            for lab, _d, p in fixed
+        )
+        th = ("padding:5px 16px;background:#f3f4f6;border-bottom:2px solid #d1d5db;"
+              "font-weight:600;text-align:left;")
+        return f"""
+        <div style='max-width:300px;'>
+          <div style='font-size:11px;color:#9ca3af;margin:2px 0 6px;'>
+            Synthetic placeholder — real per-patient probabilities pending the model.
+          </div>
+          <table style='border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;'>
+            <thead><tr><th style='{th}'>Time</th><th style='{th}'>P(not readmitted)</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+        """
+
     def load_patient_timeline_html(self, patient_id):
         """
         Load timeline as client-side HTML/JS (Plotly.js) — no IBD filter round-trip.
