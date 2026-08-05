@@ -1036,7 +1036,7 @@ class PatientTimelineApp:
             f"<td style='padding:5px 16px;'>{p:.1%}</td></tr>"
             for lab, _d, p in fixed
         )
-        th = ("padding:5px 16px;background:#f3f4f6;border-bottom:2px solid #d1d5db;"
+        th = ("padding:5px 16px;color:#111827;background:#f3f4f6;border-bottom:2px solid #d1d5db;"
               "font-weight:600;text-align:left;")
         return f"""
         <div style='max-width:300px;'>
