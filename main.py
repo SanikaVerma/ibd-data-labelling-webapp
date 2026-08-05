@@ -417,6 +417,13 @@ def create_interface():
                 # Chart information panel - shows patient stats and flare summaries
                 chart_info = gr.Textbox(label="Chart Information", value="No patient data loaded",
                                       lines=3, interactive=False, max_lines=4)
+
+                # Readmission probability curve (per patient), below the timeline.
+                gr.Markdown("### Readmission probability")
+                readmission_curve = gr.Plot()
+                readmission_table = gr.HTML(
+                    value="<p style='color:#6b7280;padding:8px;'>Select a patient.</p>"
+                )
         
         # ====================================================================
         # TAB 3: LABELLING MODE
@@ -727,6 +734,11 @@ def create_interface():
             return (gr.update(choices=app.note_choices(patient_id), value=None),
                     app.get_note_gradient_fig(patient_id, None))
 
+        # Redraw the readmission curve + table when the patient changes.
+        def _refresh_readmission(patient_id):
+            return (app.get_readmission_fig(patient_id),
+                    app.get_readmission_table_html(patient_id))
+
         # Load timeline button — returns HTML/JS with filter buttons embedded
         load_timeline_btn.click(
             app.load_patient_timeline_html,
@@ -734,6 +746,9 @@ def create_interface():
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
         ).then(
             _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_gradient]
+        ).then(
+            _refresh_readmission, inputs=[patient_dropdown],
+            outputs=[readmission_curve, readmission_table]
         )
 
         # Auto-load when patient dropdown changes
@@ -743,6 +758,9 @@ def create_interface():
             outputs=[timeline_plot, chart_status, chart_info, xai_list]
         ).then(
             _refresh_notes, inputs=[patient_dropdown], outputs=[note_selector, note_gradient]
+        ).then(
+            _refresh_readmission, inputs=[patient_dropdown],
+            outputs=[readmission_curve, readmission_table]
         )
 
         # Draw the gradient bar for the selected note.
