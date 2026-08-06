@@ -21,6 +21,43 @@ def _load_study_config(config_path: str = "study_config.yaml") -> dict:
         return {}
 
 
+# Cache XaiArrayReader instances so we don't re-parse variable_properties.yaml,
+# reload the Llama tokenizer, or re-read the ~100k-row DPD drug CSV on every
+# patient selection (that alone made the XAI list ~3 s per click). Keyed by
+# (dir, suffix); the arrays don't change during a session.
+_XAI_READER_CACHE = {}
+
+
+def _get_xai_reader(base_dir, suffix):
+    """Return a cached XaiArrayReader for (base_dir, suffix), building it once."""
+    key = (base_dir, suffix)
+    reader = _XAI_READER_CACHE.get(key)
+    if reader is None:
+        from xai_arrays import XaiArrayReader
+        reader = XaiArrayReader(base_dir, suffix)
+        _XAI_READER_CACHE[key] = reader
+    return reader
+
+
+def prewarm_xai():
+    """Build the XAI reader and pre-load its slow parts (the DPD drug CSV and the
+    Llama tokenizer) once at startup, so the FIRST patient selection is fast too.
+    Meant to run in a background thread; fails quietly if XAI isn't configured."""
+    try:
+        cfg = (_load_study_config().get("xai_arrays")) or {}
+        base_dir = cfg.get("dir")
+        if not base_dir:
+            return
+        reader = _get_xai_reader(base_dir, cfg.get("suffix", "train"))
+        eps = list(getattr(reader, "episode_ids", []) or [])
+        if eps:
+            reader.drug_records(eps[0])   # warms the DPD CSV
+            reader.text_records(eps[0])   # warms the Llama tokenizer
+        print("[prewarm_xai] XAI reader, DPD and tokenizer ready")
+    except Exception as e:
+        print(f"[prewarm_xai] skipped: {e}")
+
+
 class PatientTimelineApp:
     """
     Main application class for the Patient Timeline Viewer.
@@ -721,7 +758,6 @@ class PatientTimelineApp:
         if not patient_id:
             return "<p style='color:#6b7280;padding:12px;'>Select a patient to see importance scores.</p>"
 
-        from xai_arrays import XaiArrayReader
         study_config = _load_study_config()
         xai_cfg = study_config.get("xai_arrays") or {}
         base_dir = xai_cfg.get("dir")
@@ -730,7 +766,7 @@ class PatientTimelineApp:
             return "<p style='color:#6b7280;padding:12px;'>No xai_arrays directory configured in study_config.yaml.</p>"
 
         try:
-            reader = XaiArrayReader(base_dir, suffix)
+            reader = _get_xai_reader(base_dir, suffix)
         except Exception as e:
             return f"<p style='color:#ef4444;padding:12px;'>Could not load XAI arrays: {e}</p>"
 
@@ -798,13 +834,12 @@ class PatientTimelineApp:
         """
         if not patient_id:
             return None, None
-        from xai_arrays import XaiArrayReader
         cfg = (_load_study_config().get("xai_arrays")) or {}
         base_dir = cfg.get("dir")
         if not base_dir:
             return None, None
         try:
-            reader = XaiArrayReader(base_dir, cfg.get("suffix", "train"))
+            reader = _get_xai_reader(base_dir, cfg.get("suffix", "train"))
         except Exception:
             return None, None
         try:
