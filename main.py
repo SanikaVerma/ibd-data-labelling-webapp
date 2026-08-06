@@ -937,6 +937,12 @@ if __name__ == "__main__":
     # (This extends the PatientTimelineApp class with additional methods)
     add_monthly_labelling_methods(PatientTimelineApp)
     
+    # Pre-warm the XAI reader (DPD CSV + Llama tokenizer) in the background so the
+    # first patient selection is fast, not a 3-5 s cold load.
+    import threading
+    from patient_timeline_webapp import prewarm_xai
+    threading.Thread(target=prewarm_xai, daemon=True).start()
+
     # Create and launch the Gradio web interface
     demo = create_interface()
     demo.launch()  # By default launches on localhost:7860
